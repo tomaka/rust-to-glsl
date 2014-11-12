@@ -1,0 +1,10 @@
+[package]
+
+name = "rust_to_glsl"
+version = "0.0.1"
+authors = ["Pierre Krieger <pierre.krieger1708@gmail.com>"]
+
+[lib]
+name = "rust_to_glsl"
+path = "src/lib.rs"
+plugin = true
