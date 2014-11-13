@@ -14,6 +14,8 @@ use syntax::codemap::Span;
 use syntax::parse;
 use syntax::ptr::P;
 
+use std::io::MemWriter;
+
 #[doc(hidden)]
 #[plugin_registrar]
 pub fn registrar(registry: &mut rustc::plugin::Registry) {
@@ -59,50 +61,16 @@ pub enum Error {
 /// Turns Rust code into GLSL.
 pub fn rust_to_glsl(input: &[TokenTree], max_glsl_version: &GlslVersion) -> Result<String, Error> {
     let mut result = String::new();
-
-    // this variable contains the minimum required GLSL version
-    let mut req_glsl_version = GlslVersion(1, 1);
+    let mut context = Context {
+        req_glsl_version: GlslVersion(1, 1),
+        functions: Vec::new(),
+    };
 
     let parse_sess = parse::new_parse_sess();
     let mut parser = parse::new_parser_from_tts(&parse_sess, Vec::new(), input.to_vec());
 
-    while let Some(item) = parser.parse_item_with_outer_attributes() {
-        let item_name = item.ident.as_str();
-
-        match item.node {
-            ast::ItemFn(ref decl, _, _, ref generics, ref block) => {
-                if generics.lifetimes.len() != 0 || generics.ty_params.len() != 0 ||
-                    generics.where_clause.predicates.len() != 0
-                {
-                    return Err(FoundGenerics(item.to_source()))
-                }
-
-                // TODO: args
-                result.push_str(format!("{ret} {name}() {{\n",
-                    name = item_name, ret = try!(ty_to_glsl(&decl.output)))[]);
-
-                result.push_str(try!(block_to_glsl(block))[]);
-
-                result.push_str("}");
-            },
-
-            ast::ItemStatic(ref ty, _, _) => {
-                result.push_str(format!("uniform {ty} {name};\n",
-                    ty = try!(ty_to_glsl(ty)), name = item_name)[]);
-            },
-
-            ast::ItemConst(ref ty, ref expr) => {
-                result.push_str(format!("const {ty} {name} = {expr};\n",
-                    ty = try!(ty_to_glsl(ty)), name = item_name, expr = expr.to_source())[]);
-            },
-
-            ast::ItemMod(..) | ast::ItemForeignMod(..) | ast::ItemTrait(..) | ast::ItemImpl(..) |
-            ast::ItemMac(..) => {
-                return Err(UnexpectedConstruct(item.to_source()))
-            }
-
-            _ => unimplemented!()
-        }
+    while let Some(ref item) = parser.parse_item_with_outer_attributes() {
+        result.push_str(try!(item_to_glsl(&mut context, item))[]);
     }
 
     if !parser.eat(&parse::token::Eof) {
@@ -110,12 +78,60 @@ pub fn rust_to_glsl(input: &[TokenTree], max_glsl_version: &GlslVersion) -> Resu
     }
 
     // prepending req_glsl_version
-    let result = format!("#version {}{}0\n{}", req_glsl_version.0, req_glsl_version.1, result);
+    let req_glsl_version = context.req_glsl_version;
+    let result = format!("#version {}{}0\n{}", req_glsl_version.0, req_glsl_version.1, result);       // TODO:
+    Ok(result)
+}
+
+struct Context {
+    req_glsl_version: GlslVersion,
+    functions: Vec<String>,
+}
+
+fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Error> {
+    let item_name = item.ident.as_str();
+    let mut result = String::new();
+
+    match item.node {
+        ast::ItemFn(ref decl, _, _, ref generics, ref block) => {
+            if generics.lifetimes.len() != 0 || generics.ty_params.len() != 0 ||
+                generics.where_clause.predicates.len() != 0
+            {
+                return Err(FoundGenerics(item.to_source()))
+            }
+
+            // TODO: args
+            result.push_str(format!("{ret} {name}() {{\n",
+                name = item_name, ret = try!(ty_to_glsl(context, &decl.output)))[]);
+
+            result.push_str(try!(block_to_glsl(context, block))[]);
+
+            result.push_str("}");
+        },
+
+        ast::ItemStatic(ref ty, _, _) => {
+            result.push_str(format!("uniform {ty} {name};\n",
+                ty = try!(ty_to_glsl(context, ty)), name = item_name)[]);
+        },
+
+        ast::ItemConst(ref ty, ref expr) => {
+            result.push_str(format!("const {ty} {name} = {expr};\n",
+                ty = try!(ty_to_glsl(context, ty)), name = item_name, expr = expr.to_source())[]);
+        },
+
+        ast::ItemMod(..) | ast::ItemForeignMod(..) | ast::ItemTrait(..) | ast::ItemImpl(..) |
+        ast::ItemMac(..) => {
+            return Err(UnexpectedConstruct(item.to_source()))
+        }
+
+        _ => unimplemented!()
+    };
+
     Ok(result)
 }
 
 /// Turns a Ty into a GLSL type.
-fn ty_to_glsl(ty: &P<ast::Ty>) -> Result<String, Error> {
+fn ty_to_glsl(context: &mut Context, ty: &P<ast::Ty>) -> Result<String, Error> {
     let ty = ty.to_source();
 
     let overwrite = match ty[] {
@@ -140,27 +156,27 @@ fn ty_to_glsl(ty: &P<ast::Ty>) -> Result<String, Error> {
 }
 
 /// Turns a Stmt into a GLSL expression.
-fn stmt_to_glsl(stmt: &P<ast::Stmt>) -> Result<String, Error> {
+fn stmt_to_glsl(context: &mut Context, stmt: &P<ast::Stmt>) -> Result<String, Error> {
     match stmt.node {
         ast::StmtDecl(ref decl, _) => unimplemented!(),
-        ast::StmtExpr(ref expr, _) => expr_to_glsl(expr),
-        ast::StmtSemi(ref expr, _) => expr_to_glsl(expr),
+        ast::StmtExpr(ref expr, _) => expr_to_glsl(context, expr),
+        ast::StmtSemi(ref expr, _) => expr_to_glsl(context, expr),
         ast::StmtMac(..) => Err(UnexpectedConstruct(stmt.to_source()))
     }
 }
 
 /// Turns a Stmt into a GLSL expression.
-fn block_to_glsl(block: &P<ast::Block>) -> Result<String, Error> {
+fn block_to_glsl(context: &mut Context, block: &P<ast::Block>) -> Result<String, Error> {
     let mut result = String::new();
 
     for stmt in block.stmts.iter() {
-        result.push_str(try!(stmt_to_glsl(stmt))[]);
+        result.push_str(try!(stmt_to_glsl(context, stmt))[]);
         result.push_str("\n");
     }
 
     if let Some(ref expr) = block.expr {
         result.push_str("return ");
-        result.push_str(try!(expr_to_glsl(expr))[]);
+        result.push_str(try!(expr_to_glsl(context, expr))[]);
         result.push_str(";\n");
     }
 
@@ -168,11 +184,13 @@ fn block_to_glsl(block: &P<ast::Block>) -> Result<String, Error> {
 }
 
 /// Turns an Expr into a GLSL expression.
-fn expr_to_glsl(expr: &P<ast::Expr>) -> Result<String, Error> {
+fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Error> {
     match expr.node {
         ast::ExprCast(ref e, ref t) => Ok(format!("(({t})({e}))", t=t, e=e)),
-        ast::ExprLit(ref lit) => lit_to_glsl(lit),
-        ast::ExprRet(Some(ref expr)) => Ok(format!("return {e};", e = try!(expr_to_glsl(expr)))),
+        ast::ExprLit(ref lit) => lit_to_glsl(context, lit),
+        ast::ExprRet(Some(ref expr)) => {
+            Ok(format!("return {e};", e = try!(expr_to_glsl(context, expr))))
+        },
         ast::ExprRet(None) => Ok(format!("return;")),
         /*ExprVec(Vec<P<Expr>>),
         ExprCall(P<Expr>, Vec<P<Expr>>),
@@ -211,7 +229,7 @@ fn expr_to_glsl(expr: &P<ast::Expr>) -> Result<String, Error> {
 }
 
 /// Turns a literal into a GLSL expression.
-fn lit_to_glsl(lit: &P<ast::Lit>) -> Result<String, Error> {
+fn lit_to_glsl(context: &mut Context, lit: &P<ast::Lit>) -> Result<String, Error> {
     match lit.node {
         ast::LitInt(val, ast::SignedIntLit(_, ast::Minus)) => Ok(format!("-{}", val)),
         ast::LitInt(val, _) => Ok(format!("{}", val)),
