@@ -10,7 +10,7 @@ fn main() {
         static t: f32 = 1;
 
         fn hello() {
-            5
+            min(5, 3)
         }
     );
 

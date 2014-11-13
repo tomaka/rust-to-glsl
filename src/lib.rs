@@ -109,7 +109,7 @@ fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Er
             if context.functions.iter().any(|f| f[] == item_name) {
                 return Err(DuplicateItem(item_name.to_string()));
             }
-            
+
             context.functions.push(item_name.to_string());
 
             // TODO: args
@@ -204,6 +204,24 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
             Ok(format!("return {e};", e = try!(expr_to_glsl(context, expr))))
         },
         ast::ExprRet(None) => Ok(format!("return;")),
+        ast::ExprBreak(None) => Ok(format!("break;")),
+        ast::ExprCall(ref f, ref params_in) => {
+            let fn_call = try!(expr_to_glsl(context, f));
+
+            let mut params = Vec::new();
+            for p in params_in.iter() {
+                params.push(try!(expr_to_glsl(context, p)));
+            }
+
+            Ok(format!("{}({})", fn_call, params.connect(", ")))
+        },
+        ast::ExprPath(ref path) => {
+            if path.global || path.segments.len() != 1 {
+                return Err(UnexpectedConstruct(expr.to_source()));
+            }
+
+            Ok(path.segments[0].identifier.as_str().to_string())
+        },
         /*ExprVec(Vec<P<Expr>>),
         ExprCall(P<Expr>, Vec<P<Expr>>),
         ExprMethodCall(SpannedIdent, Vec<P<Ty>>, Vec<P<Expr>>),
@@ -225,11 +243,9 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
         ExprTupField(P<Expr>, Spanned<uint>, Vec<P<Ty>>),
         ExprIndex(P<Expr>, P<Expr>),
         ExprSlice(P<Expr>, Option<P<Expr>>, Option<P<Expr>>, Mutability),
-        ExprPath(Path),
         ExprAddrOf(Mutability, P<Expr>),
         ExprBreak(Option<Ident>),
         ExprAgain(Option<Ident>),
-        ExprRet(Option<P<Expr>>),
         ExprInlineAsm(InlineAsm),
         ExprMac(Mac),
         ExprStruct(Path, Vec<Field>, Option<P<Expr>>),
