@@ -116,7 +116,7 @@ fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Er
             result.push_str(format!("{ret} {name}() {{\n",
                 name = item_name, ret = try!(ty_to_glsl(context, &decl.output)))[]);
 
-            result.push_str(try!(block_to_glsl(context, block))[]);
+            result.push_str(try!(block_to_glsl(context, block, true))[]);
 
             result.push_str("}");
         },
@@ -158,6 +158,7 @@ fn ty_to_glsl(context: &mut Context, ty: &P<ast::Ty>) -> Result<String, Error> {
         "u32" => Some("unsigned int"),
         "f32" => Some("float"),
         "f64" => return Err(UnsupportedType("f64".to_string())),
+        "&Texture2d" => Some("sampler2d"),
         _ => None
     };
 
@@ -171,14 +172,14 @@ fn ty_to_glsl(context: &mut Context, ty: &P<ast::Ty>) -> Result<String, Error> {
 fn stmt_to_glsl(context: &mut Context, stmt: &P<ast::Stmt>) -> Result<String, Error> {
     match stmt.node {
         ast::StmtDecl(ref decl, _) => unimplemented!(),
-        ast::StmtExpr(ref expr, _) => expr_to_glsl(context, expr),
-        ast::StmtSemi(ref expr, _) => expr_to_glsl(context, expr),
+        ast::StmtExpr(ref expr, _) => expr_stmt_to_glsl(context, expr),
+        ast::StmtSemi(ref expr, _) => expr_stmt_to_glsl(context, expr),
         ast::StmtMac(..) => Err(UnexpectedConstruct(stmt.to_source()))
     }
 }
 
 /// Turns a Stmt into a GLSL expression.
-fn block_to_glsl(context: &mut Context, block: &P<ast::Block>) -> Result<String, Error> {
+fn block_to_glsl(context: &mut Context, block: &P<ast::Block>, allow_expr: bool) -> Result<String, Error> {
     let mut result = String::new();
 
     for stmt in block.stmts.iter() {
@@ -187,12 +188,55 @@ fn block_to_glsl(context: &mut Context, block: &P<ast::Block>) -> Result<String,
     }
 
     if let Some(ref expr) = block.expr {
+        if !allow_expr {
+            return Err(UnexpectedConstruct(expr.to_source()));
+        }
+
         result.push_str("return ");
         result.push_str(try!(expr_to_glsl(context, expr))[]);
         result.push_str(";\n");
     }
 
     Ok(result)
+}
+
+/// Turns an Expr used in the context of a Stmt into a GLSL expression.
+fn expr_stmt_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Error> {
+    match expr.node {
+        ast::ExprIf(ref cond, ref block, ref el) => {
+            let cond = try!(expr_to_glsl(context, cond));
+            let block = try!(block_to_glsl(context, block, false));
+            if el.is_some() { unimplemented!() }        // TODO: 
+
+            Ok(format!("if ({}) {{ {} }}", cond, block))
+        },
+        ast::ExprWhile(ref cond, ref block, None) => {
+            let cond = try!(expr_to_glsl(context, cond));
+            let block = try!(block_to_glsl(context, block, false));
+
+            Ok(format!("while ({}) {{ {} }}", cond, block))
+        },
+        ast::ExprLoop(ref block, None) => {
+            let block = try!(block_to_glsl(context, block, false));
+            Ok(format!("while (true) {{ {} }}", block))
+        },
+        ast::ExprBlock(ref block) => {
+            let block = try!(block_to_glsl(context, block, false));
+            Ok(format!("{{ {} }}", block))
+        },
+        ast::ExprRet(Some(ref expr)) => {
+            Ok(format!("return {e};", e = try!(expr_to_glsl(context, expr))))
+        },
+        ast::ExprRet(None) => {
+            Ok(format!("return;"))
+        },
+        ast::ExprBreak(None) => {
+            Ok(format!("break;"))
+        },
+        _ => {
+            Err(UnexpectedConstruct(expr.to_source()))
+        }
+    }
 }
 
 /// Turns an Expr into a GLSL expression.
@@ -222,35 +266,64 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
 
             Ok(path.segments[0].identifier.as_str().to_string())
         },
+        ast::ExprBinary(op, ref left, ref right) => {
+            let op = match op {
+                ast::BiAdd => "+",
+                ast::BiSub => "-",
+                ast::BiMul => "*",
+                ast::BiDiv => "/",
+                ast::BiRem => "%",
+                ast::BiAnd => "&&",
+                ast::BiOr => "||",
+                ast::BiBitXor => "^",
+                ast::BiBitAnd => "&",
+                ast::BiBitOr => "|",
+                ast::BiShl => "<<",
+                ast::BiShr => ">>",
+                ast::BiEq => "==",
+                ast::BiLt => "<",
+                ast::BiLe => "<=",
+                ast::BiNe => "!=",
+                ast::BiGe => ">=",
+                ast::BiGt => ">",
+            };
+
+            let left = try!(expr_to_glsl(context, left));
+            let right = try!(expr_to_glsl(context, right));
+
+            Ok(format!("({} {} {})", left, op, right))
+        },
+        ast::ExprUnary(op, ref val) => {
+            let op = match op {
+                ast::UnNot => "!",
+                ast::UnNeg => "-",
+                _ => {
+                    return Err(UnexpectedConstruct(expr.to_source()));
+                }
+            };
+
+            let val = try!(expr_to_glsl(context, val));
+
+            Ok(format!("({}{})", op, val))
+        },
+        ast::ExprParen(ref expr) => {
+            let expr = try!(expr_to_glsl(context, expr));
+            Ok(format!("({})", expr))
+        },
         /*ExprVec(Vec<P<Expr>>),
         ExprCall(P<Expr>, Vec<P<Expr>>),
         ExprMethodCall(SpannedIdent, Vec<P<Ty>>, Vec<P<Expr>>),
         ExprTup(Vec<P<Expr>>),
-        ExprBinary(BinOp, P<Expr>, P<Expr>),
-        ExprUnary(UnOp, P<Expr>),
-        ExprIf(P<Expr>, P<Block>, Option<P<Expr>>),
-        ExprWhile(P<Expr>, P<Block>, Option<Ident>),
         ExprForLoop(P<Pat>, P<Expr>, P<Block>, Option<Ident>),
-        ExprLoop(P<Block>, Option<Ident>),
-        ExprMatch(P<Expr>, Vec<Arm>, MatchSource),
-        ExprFnBlock(CaptureClause, P<FnDecl>, P<Block>),
-        ExprProc(P<FnDecl>, P<Block>),
-        ExprUnboxedFn(CaptureClause, UnboxedClosureKind, P<FnDecl>, P<Block>),
-        ExprBlock(P<Block>),
         ExprAssign(P<Expr>, P<Expr>),
         ExprAssignOp(BinOp, P<Expr>, P<Expr>),
         ExprField(P<Expr>, SpannedIdent, Vec<P<Ty>>),
         ExprTupField(P<Expr>, Spanned<uint>, Vec<P<Ty>>),
         ExprIndex(P<Expr>, P<Expr>),
-        ExprSlice(P<Expr>, Option<P<Expr>>, Option<P<Expr>>, Mutability),
-        ExprAddrOf(Mutability, P<Expr>),
-        ExprBreak(Option<Ident>),
         ExprAgain(Option<Ident>),
-        ExprInlineAsm(InlineAsm),
         ExprMac(Mac),
         ExprStruct(Path, Vec<Field>, Option<P<Expr>>),
-        ExprRepeat(P<Expr>, P<Expr>),
-        ExprParen(P<Expr>),*/
+        ExprRepeat(P<Expr>, P<Expr>),*/
 
         _ => Err(UnexpectedConstruct(expr.to_source())),
     }
