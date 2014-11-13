@@ -45,16 +45,22 @@ pub struct GlslVersion(pub u8, pub u8);
 /// Error that can happen while converting.
 #[deriving(Show, Clone)]
 pub enum Error {
-    /// Found a type that is not supported 
+    /// Found a duplicate item.
+    DuplicateItem(String),
+
+    /// Found a type that is not supported .
     UnsupportedType(String),
+
     /// Found generics.
     ///
     /// Contains the source code of the item containing them.
     FoundGenerics(String),
+
     /// Found a Rust construct that is not supported by GLSL, like a `mod` or a `trait`.
     ///
     /// Contains the source code of the unexpected item or expr.
     UnexpectedConstruct(String),
+
     Misc,        // TODO: remove this error type
 }
 
@@ -99,6 +105,12 @@ fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Er
             {
                 return Err(FoundGenerics(item.to_source()))
             }
+
+            if context.functions.iter().any(|f| f[] == item_name) {
+                return Err(DuplicateItem(item_name.to_string()));
+            }
+            
+            context.functions.push(item_name.to_string());
 
             // TODO: args
             result.push_str(format!("{ret} {name}() {{\n",
