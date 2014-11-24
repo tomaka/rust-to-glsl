@@ -59,7 +59,7 @@ pub enum Error {
     /// Found a Rust construct that is not supported by GLSL, like a `mod` or a `trait`.
     ///
     /// Contains the source code of the unexpected item or expr.
-    UnexpectedConstruct(String),
+    UnexpectedContruct(String),
 
     Misc,        // TODO: remove this error type
 }
@@ -80,7 +80,7 @@ pub fn rust_to_glsl(input: &[TokenTree], max_glsl_version: &GlslVersion) -> Resu
     }
 
     if !parser.eat(&parse::token::Eof) {
-        return Err(Misc);       // TODO: 
+        return Err(Error::Misc);       // TODO: 
     }
 
     // prepending req_glsl_version
@@ -103,18 +103,18 @@ fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Er
             if generics.lifetimes.len() != 0 || generics.ty_params.len() != 0 ||
                 generics.where_clause.predicates.len() != 0
             {
-                return Err(FoundGenerics(item.to_source()))
+                return Err(Error::FoundGenerics(item.to_source()))
             }
 
             if context.functions.iter().any(|f| f[] == item_name) {
-                return Err(DuplicateItem(item_name.to_string()));
+                return Err(Error::DuplicateItem(item_name.to_string()));
             }
 
             context.functions.push(item_name.to_string());
 
             // TODO: args
             result.push_str(format!("{ret} {name}() {{\n",
-                name = item_name, ret = try!(ty_to_glsl(context, &decl.output)))[]);
+                name = item_name, ret = try!(functionretty_to_glsl(context, &decl.output)))[]);
 
             result.push_str(try!(block_to_glsl(context, block, true))[]);
 
@@ -133,13 +133,21 @@ fn item_to_glsl(context: &mut Context, item: &P<ast::Item>) -> Result<String, Er
 
         ast::ItemMod(..) | ast::ItemForeignMod(..) | ast::ItemTrait(..) | ast::ItemImpl(..) |
         ast::ItemMac(..) => {
-            return Err(UnexpectedConstruct(item.to_source()))
+            return Err(Error::UnexpectedContruct(item.to_source()))
         }
 
         _ => unimplemented!()
     };
 
     Ok(result)
+}
+
+/// Turns a FunctionRetTy into a GLSL type.
+fn functionretty_to_glsl(context: &mut Context, ty: &ast::FunctionRetTy) -> Result<String, Error> {
+    match ty {
+        &ast::FunctionRetTy::NoReturn(_) => Err(Error::UnexpectedContruct("!".to_string())),
+        &ast::FunctionRetTy::Return(ref ty) => ty_to_glsl(context, ty)
+    }
 }
 
 /// Turns a Ty into a GLSL type.
@@ -157,7 +165,7 @@ fn ty_to_glsl(context: &mut Context, ty: &P<ast::Ty>) -> Result<String, Error> {
         "i32" => Some("int"),
         "u32" => Some("unsigned int"),
         "f32" => Some("float"),
-        "f64" => return Err(UnsupportedType("f64".to_string())),
+        "f64" => return Err(Error::UnsupportedType("f64".to_string())),
         "&Texture2d" => Some("sampler2d"),
         _ => None
     };
@@ -174,7 +182,7 @@ fn stmt_to_glsl(context: &mut Context, stmt: &P<ast::Stmt>) -> Result<String, Er
         ast::StmtDecl(ref decl, _) => unimplemented!(),
         ast::StmtExpr(ref expr, _) => expr_stmt_to_glsl(context, expr),
         ast::StmtSemi(ref expr, _) => expr_stmt_to_glsl(context, expr),
-        ast::StmtMac(..) => Err(UnexpectedConstruct(stmt.to_source()))
+        ast::StmtMac(..) => Err(Error::UnexpectedContruct(stmt.to_source()))
     }
 }
 
@@ -189,7 +197,7 @@ fn block_to_glsl(context: &mut Context, block: &P<ast::Block>, allow_expr: bool)
 
     if let Some(ref expr) = block.expr {
         if !allow_expr {
-            return Err(UnexpectedConstruct(expr.to_source()));
+            return Err(Error::UnexpectedContruct(expr.to_source()));
         }
 
         result.push_str("return ");
@@ -234,7 +242,7 @@ fn expr_stmt_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<Strin
             Ok(format!("break;"))
         },
         _ => {
-            Err(UnexpectedConstruct(expr.to_source()))
+            Err(Error::UnexpectedContruct(expr.to_source()))
         }
     }
 }
@@ -261,7 +269,7 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
         },
         ast::ExprPath(ref path) => {
             if path.global || path.segments.len() != 1 {
-                return Err(UnexpectedConstruct(expr.to_source()));
+                return Err(Error::UnexpectedContruct(expr.to_source()));
             }
 
             Ok(path.segments[0].identifier.as_str().to_string())
@@ -298,7 +306,7 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
                 ast::UnNot => "!",
                 ast::UnNeg => "-",
                 _ => {
-                    return Err(UnexpectedConstruct(expr.to_source()));
+                    return Err(Error::UnexpectedContruct(expr.to_source()));
                 }
             };
 
@@ -325,7 +333,7 @@ fn expr_to_glsl(context: &mut Context, expr: &P<ast::Expr>) -> Result<String, Er
         ExprStruct(Path, Vec<Field>, Option<P<Expr>>),
         ExprRepeat(P<Expr>, P<Expr>),*/
 
-        _ => Err(UnexpectedConstruct(expr.to_source())),
+        _ => Err(Error::UnexpectedContruct(expr.to_source())),
     }
 }
 
@@ -338,10 +346,9 @@ fn lit_to_glsl(context: &mut Context, lit: &P<ast::Lit>) -> Result<String, Error
         ast::LitFloatUnsuffixed(ref s) => Ok(s.get().to_string()),
         ast::LitBool(val) => Ok(if val { "true" } else { "false" }.to_string()),
 
-        ast::LitStr(ref val, _) => Err(UnexpectedConstruct(val.get().to_string())),
-        ast::LitBinary(ref val) => Err(UnexpectedConstruct(val.to_string())),
-        ast::LitByte(val) => Err(UnexpectedConstruct(val.to_string())),
-        ast::LitChar(val) => Err(UnexpectedConstruct(val.to_string())),
-        ast::LitNil => Err(UnexpectedConstruct("()".to_string())),
+        ast::LitStr(ref val, _) => Err(Error::UnexpectedContruct(val.get().to_string())),
+        ast::LitBinary(ref val) => Err(Error::UnexpectedContruct(val.to_string())),
+        ast::LitByte(val) => Err(Error::UnexpectedContruct(val.to_string())),
+        ast::LitChar(val) => Err(Error::UnexpectedContruct(val.to_string())),
     }
 }
